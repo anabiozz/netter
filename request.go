@@ -75,6 +75,16 @@ func getBodyReader(body interface{}) (bodyReader ReaderFunc, contentLength int64
 			}
 			contentLength = int64(bodyType.Len())
 
+		case io.Reader:
+			buf, err := ioutil.ReadAll(bodyType)
+			if err != nil {
+				return nil, 0, err
+			}
+			bodyReader = func() (io.ReadCloser, error) {
+				return ioutil.NopCloser(bytes.NewReader(buf)), nil
+			}
+			contentLength = int64(len(buf))
+
 		default:
 			return nil, 0, fmt.Errorf("cannot handle type %T", bodyType)
 		}

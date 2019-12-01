@@ -41,7 +41,7 @@ func (c *custReader) Read(p []byte) (n int, err error) {
 func TestClientDo(t *testing.T) {
 	testBytes := []byte("hello")
 	// Native func
-	testClientDo(t, reader(func() (io.Reader, error) {
+	testClientDo(t, ReaderFunc(func() (io.Reader, error) {
 		return bytes.NewReader(testBytes), nil
 	}))
 	testClientDo(t, func() (io.Reader, error) {
@@ -82,8 +82,6 @@ func testClientDo(t *testing.T, body interface{}) {
 			"caller", log.DefaultCaller,
 		)
 	}
-
-	client.Logger = logger
 
 	// Send the request
 	var resp *http.Response
