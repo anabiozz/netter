@@ -6,16 +6,13 @@ import (
 	"time"
 )
 
-// DefaultTransport ..
-var DefaultTransport = &http.Transport{
+var defaultTransport = &http.Transport{
 	Proxy: http.ProxyFromEnvironment,
 	DialContext: (&net.Dialer{
 		// timeout on TCP dialing
 		Timeout: 30 * time.Second,
 		// TCP KeepAlive specifies the interval between keep-alive probes for an active network connection.
 		KeepAlive: 30 * time.Second,
-		// for both ip4 and ip6
-		DualStack: true,
 	}).DialContext,
 	ResponseHeaderTimeout: 60 * time.Second,
 	MaxIdleConns:          100,

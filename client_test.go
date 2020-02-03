@@ -1,169 +1,238 @@
 package netter
 
 import (
-	"bytes"
+	"fmt"
 	"io"
-	"io/ioutil"
-	"net"
 	"net/http"
-	"os"
+	"net/http/httptest"
 	"strings"
-	"sync/atomic"
 	"testing"
 	"time"
-
-	"github.com/go-kit/kit/log"
-	"github.com/go-kit/kit/log/level"
 )
 
-// Since normal ways we would generate a Reader have special cases, use a
-// custom type here
-type custReader struct {
-	val string
-	pos int
-}
-
-func (c *custReader) Read(p []byte) (n int, err error) {
-	if c.val == "" {
-		c.val = "hello"
-	}
-	if c.pos >= len(c.val) {
-		return 0, io.EOF
-	}
-	var i int
-	for i = 0; i < len(p) && i+c.pos < len(c.val); i++ {
-		p[i] = c.val[i+c.pos]
-	}
-	c.pos += i
-	return i, nil
-}
-
-func TestClientDo(t *testing.T) {
-	testBytes := []byte("hello")
-	// Native func
-	testClientDo(t, ReaderFunc(func() (io.Reader, error) {
-		return bytes.NewReader(testBytes), nil
-	}))
-	testClientDo(t, func() (io.Reader, error) {
-		return bytes.NewReader(testBytes), nil
-	})
-	testClientDo(t, testBytes)
-	testClientDo(t, bytes.NewBuffer(testBytes))
-	testClientDo(t, bytes.NewReader(testBytes))
-	testClientDo(t, strings.NewReader(string(testBytes)))
-	testClientDo(t, &custReader{})
-}
-
-func testClientDo(t *testing.T, body interface{}) {
-	// Create a request
-	req, err := NewRequest("PUT", "http://127.0.0.1:28934/v1/foo", body)
+var robotsTxtHandler = http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
+	w.Header().Set("Last-Modified", "sometime")
+	_, err := fmt.Fprintf(w, "User-agent: go\nDisallow: /something/")
 	if err != nil {
-		t.Fatalf("err: %v", err)
+		fmt.Println(err)
 	}
-	req.Header.Set("foo", "bar")
+})
 
-	// Track the number of times the logging hook was called
-	retryCount := -1
+func TestClient(t *testing.T) {
+	ts := httptest.NewServer(robotsTxtHandler)
+	defer ts.Close()
 
-	// Create the client. Use short retry windows.
 	client := NewClient()
-	client.Retry.WaitMin = 10 * time.Millisecond
-	client.Retry.WaitMax = 50 * time.Millisecond
-	client.Retry.Max = 50
+	client.Max = 4
+	client.WaitMin = 1 * time.Second
+	client.WaitMax = 10 * time.Second
 
-	var logger log.Logger
-	{
-		logger = log.NewLogfmtLogger(os.Stderr)
-		logger = log.NewSyncLogger(logger)
-		logger = level.NewFilter(logger, level.AllowDebug())
-		logger = log.With(logger,
-			"svc", "uploader",
-			"ts", log.DefaultTimestampUTC,
-			"caller", log.DefaultCaller,
-		)
-	}
+	res, err := client.Get(ts.URL)
+	var bytes []byte
 
-	// Send the request
-	var resp *http.Response
-	doneCh := make(chan struct{})
-	go func() {
-		defer close(doneCh)
-		var err error
-		resp, err = client.Do(req)
+	if err == nil {
+		bytes, err = pedanticReadAll(res.Body)
+		t.Log(string(bytes))
+		err := res.Body.Close()
 		if err != nil {
-			t.Fatalf("err: %v", err)
+			t.Error(err)
 		}
-	}()
-
-	select {
-	case <-doneCh:
-		t.Fatalf("should retry on error")
-	case <-time.After(200 * time.Millisecond):
-		// Client should still be retrying due to connection failure.
 	}
-
-	// Create the mock handler. First we return a 500-range response to ensure
-	// that we power through and keep retrying in the face of recoverable
-	// errors.
-	code := int64(500)
-	handler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		// Check the request details
-		if r.Method != "PUT" {
-			t.Fatalf("bad method: %s", r.Method)
-		}
-		if r.RequestURI != "/v1/foo" {
-			t.Fatalf("bad uri: %s", r.RequestURI)
-		}
-
-		// Check the headers
-		if v := r.Header.Get("foo"); v != "bar" {
-			t.Fatalf("bad header: expect foo=bar, got foo=%v", v)
-		}
-
-		// Check the payload
-		body, err := ioutil.ReadAll(r.Body)
-		if err != nil {
-			t.Fatalf("err: %s", err)
-		}
-		expected := []byte("hello")
-		if !bytes.Equal(body, expected) {
-			t.Fatalf("bad: %v", body)
-		}
-
-		w.WriteHeader(int(atomic.LoadInt64(&code)))
-	})
-
-	// Create a test server
-	list, err := net.Listen("tcp", ":28934")
 	if err != nil {
-		t.Fatalf("err: %v", err)
-	}
-	defer list.Close()
-	go http.Serve(list, handler)
-
-	// Wait again
-	select {
-	case <-doneCh:
-		t.Fatalf("should retry on 500-range")
-	case <-time.After(200 * time.Millisecond):
-		// Client should still be retrying due to 500's.
-	}
-
-	// Start returning 200's
-	atomic.StoreInt64(&code, 200)
-
-	// Wait again
-	select {
-	case <-doneCh:
-	case <-time.After(time.Second):
-		t.Fatalf("timed out")
-	}
-
-	if resp.StatusCode != 200 {
-		t.Fatalf("exected 200, got: %d", resp.StatusCode)
-	}
-
-	if retryCount < 0 {
-		t.Fatal("request log hook was not called")
+		t.Error(err)
+	} else if s := string(bytes); !strings.HasPrefix(s, "User-agent:") {
+		t.Errorf("incorrect page body (did not begin with User-agent: %q", s)
 	}
 }
+
+func pedanticReadAll(r io.Reader) (b []byte, err error) {
+	var buffer [64]byte
+	buf := buffer[:]
+	for {
+		n, err := r.Read(buf)
+		if n == 0 && err == nil {
+			return nil, fmt.Errorf("read: n=0 with err=nil")
+		}
+		b = append(b, buf[:n]...)
+		if err == io.EOF {
+			n, err := r.Read(buf)
+			if n != 0 || err != io.EOF {
+				return nil, fmt.Errorf("read: n=%d err=%#v after EOF", n, err)
+			}
+			return b, nil
+		}
+		if err != nil {
+			return b, nil
+		}
+	}
+}
+
+//type clientServerTest struct {
+//	t  *testing.T
+//	h2 bool
+//	h  http.Handler
+//	ts *httptest.Server
+//	tr *http.Transport
+//	c  *Client
+//}
+//
+//func newClientServerTest() {
+//
+//}
+//
+//type reader struct {
+//	val string
+//	pos int
+//}
+//
+//func (c *reader) Read(p []byte) (n int, err error) {
+//	if c.val == "" {
+//		c.val = "hello"
+//	}
+//	if c.pos >= len(c.val) {
+//		return 0, io.EOF
+//	}
+//	var i int
+//	for i = 0; i < len(p) && i+c.pos < len(c.val); i++ {
+//		p[i] = c.val[i+c.pos]
+//	}
+//	c.pos += i
+//	return i, nil
+//}
+//
+//func TestClientDo(t *testing.T) {
+//
+//	testBytes := []byte("hello")
+//
+//	var testCases = []struct {
+//		body interface{}
+//	}{
+//		{
+//			ReaderFunc(func() (io.Reader, error) {
+//				return bytes.NewReader(testBytes), nil
+//			}),
+//		},
+//		{
+//			func() (io.Reader, error) {
+//				return bytes.NewReader(testBytes), nil
+//			},
+//		},
+//		{
+//			testBytes
+//		},
+//		{
+//			bytes.NewBuffer(testBytes)
+//		},
+//		{
+//			bytes.NewReader(testBytes)
+//		},
+//		{
+//			strings.NewReader(string(testBytes))
+//		},
+//		{
+//			strings.NewReader(string(testBytes))
+//		},
+//		{
+//			&reader{}
+//		}
+//	}
+//
+//	for _, test := range testCases {
+//		t.Run(test.desc, func(t *testing.T) {
+//			t.Parallel()
+//
+//		})
+//	}
+//
+//}
+//
+//func testClientDo(t *testing.T, body interface{}) {
+//	request, err := NewRequest("PUT", "http://127.0.0.1:28934/v1/foo", body)
+//	if err != nil {
+//		t.Fatalf("err: %v", err)
+//	}
+//	request.Header.Set("foo", "bar")
+//
+//	retryCount := -1
+//
+//	client := NewClient()
+//	client.Retry.WaitMin = 1 * time.Second
+//	client.Retry.WaitMax = 10 * time.Second
+//	client.Retry.Max = 10
+//
+//	var response *http.Response
+//	donech := make(chan struct{})
+//
+//	go func() {
+//		defer close(donech)
+//		var err error
+//		response, err = client.Do(request)
+//		if err != nil {
+//			t.Fatalf("err: %v", err)
+//		}
+//	}()
+//
+//	select {
+//	case <-donech:
+//		t.Fatalf("should retry on error")
+//	case <-time.After(200 * time.Millisecond):
+//	}
+//
+//	code := int64(500)
+//	handler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+//
+//		if r.Method != "PUT" {
+//			t.Fatalf("bad method: %s", r.Method)
+//		}
+//
+//		if r.RequestURI != "/v1/foo" {
+//			t.Fatalf("bad uri: %s", r.RequestURI)
+//		}
+//
+//		if v := r.Header.Get("foo"); v != "bar" {
+//			t.Fatalf("bad header: expect foo=bar, got foo=%v", v)
+//		}
+//
+//		body, err := ioutil.ReadAll(r.Body)
+//		if err != nil {
+//			t.Fatalf("err: %s", err)
+//		}
+//
+//		expected := []byte("hello")
+//		if !bytes.Equal(body, expected) {
+//			t.Fatalf("bad: %v", body)
+//		}
+//
+//		w.WriteHeader(int(atomic.LoadInt64(&code)))
+//	})
+//
+//	listen, err := net.Listen("tcp", ":28934")
+//	if err != nil {
+//		t.Fatalf("err: %v", err)
+//	}
+//	defer listen.Close()
+//
+//	go http.Serve(listen, handler)
+//
+//	select {
+//	case <-donech:
+//		t.Fatalf("should retry on 500-range")
+//	case <-time.After(200 * time.Millisecond):
+//	}
+//
+//	atomic.StoreInt64(&code, 200)
+//
+//	select {
+//	case <-donech:
+//	case <-time.After(time.Second):
+//		t.Fatalf("timed out")
+//	}
+//
+//	if response.StatusCode != 200 {
+//		t.Fatalf("exected 200, got: %d", response.StatusCode)
+//	}
+//
+//	if retryCount < 0 {
+//		t.Fatal("request log hook was not called")
+//	}
+//}

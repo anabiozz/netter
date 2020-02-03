@@ -11,8 +11,8 @@ import (
 )
 
 type retryer interface {
-	Retry(ctx context.Context, resp *http.Response, err error) (bool, error)
-	Backoff(min, max time.Duration, attemptNum int, resp *http.Response) time.Duration
+	retry(ctx context.Context, resp *http.Response, err error) (bool, error)
+	backoff(min, max time.Duration, attemptNum int) time.Duration
 }
 
 var (
@@ -20,14 +20,12 @@ var (
 	schemeErrorRe    = regexp.MustCompile(`unsupported protocol scheme`)
 )
 
-// Retry ..
-type Retry struct {
+type retry struct {
 	Max              int
 	WaitMin, WaitMax time.Duration
 }
 
-// Retry ..
-func (Retry) isRetry(ctx context.Context, resp *http.Response, err error) (bool, error) {
+func (retry) isRetry(ctx context.Context, resp *http.Response, err error) (bool, error) {
 	if ctx.Err() != nil {
 		return false, ctx.Err()
 	}
@@ -51,11 +49,10 @@ func (Retry) isRetry(ctx context.Context, resp *http.Response, err error) (bool,
 	return false, nil
 }
 
-// Backoff ..
-func (Retry) Backoff(min, max time.Duration, attemptNum int, resp *http.Response) time.Duration {
-	mult := math.Pow(2, float64(attemptNum)) * float64(min)
-	sleep := time.Duration(mult)
-	if float64(sleep) != mult || sleep > max {
+func (retry) backoff(min, max time.Duration, attemptNum int) time.Duration {
+	multiply := math.Pow(2, float64(attemptNum)) * float64(min)
+	sleep := time.Duration(multiply)
+	if float64(sleep) != multiply || sleep > max {
 		sleep = max
 	}
 	return sleep

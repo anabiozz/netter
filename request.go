@@ -10,7 +10,7 @@ import (
 )
 
 // ReaderFunc ..
-type ReaderFunc func() (io.ReadCloser, error)
+type ReaderFunc func() (io.Reader, error)
 
 // Request ..
 type Request struct {
@@ -52,25 +52,28 @@ func getBodyReader(body interface{}) (bodyReader ReaderFunc, contentLength int64
 				contentLength = int64(lr.Len())
 			}
 			if c, ok := tmp.(io.Closer); ok {
-				c.Close()
+				err := c.Close()
+				if err != nil {
+					return nil, 0, err
+				}
 			}
 
 		case *bytes.Reader:
-			bodyReader = func() (io.ReadCloser, error) {
+			bodyReader = func() (io.Reader, error) {
 				return ioutil.NopCloser(bodyType), nil
 			}
 			contentLength = int64(bodyType.Len())
 
 		case *bytes.Buffer:
 			buf := bodyType.Bytes()
-			bodyReader = func() (io.ReadCloser, error) {
+			bodyReader = func() (io.Reader, error) {
 				r := bytes.NewReader(buf)
 				return ioutil.NopCloser(r), nil
 			}
 			contentLength = int64(bodyType.Len())
 
 		case *strings.Reader:
-			bodyReader = func() (io.ReadCloser, error) {
+			bodyReader = func() (io.Reader, error) {
 				return ioutil.NopCloser(bodyType), nil
 			}
 			contentLength = int64(bodyType.Len())
@@ -80,7 +83,7 @@ func getBodyReader(body interface{}) (bodyReader ReaderFunc, contentLength int64
 			if err != nil {
 				return nil, 0, err
 			}
-			bodyReader = func() (io.ReadCloser, error) {
+			bodyReader = func() (io.Reader, error) {
 				return ioutil.NopCloser(bytes.NewReader(buf)), nil
 			}
 			contentLength = int64(len(buf))
