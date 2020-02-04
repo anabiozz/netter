@@ -9,7 +9,7 @@ import (
 	"strings"
 )
 
-// ReaderFunc ..
+// ReaderFunc represents request body type
 type ReaderFunc func() (io.Reader, error)
 
 // Request ..
@@ -39,7 +39,6 @@ func NewRequest(method, url string, rawBody interface{}) (*Request, error) {
 }
 
 func getBodyReader(body interface{}) (bodyReader ReaderFunc, contentLength int64, err error) {
-
 	if body != nil {
 		switch bodyType := body.(type) {
 		case ReaderFunc:

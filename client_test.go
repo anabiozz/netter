@@ -5,6 +5,8 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"runtime"
+	"sort"
 	"strings"
 	"testing"
 	"time"
@@ -19,6 +21,9 @@ var robotsTxtHandler = http.HandlerFunc(func(w http.ResponseWriter, req *http.Re
 })
 
 func TestClient(t *testing.T) {
+	setParallel(t)
+	defer afterTest(t)
+
 	ts := httptest.NewServer(robotsTxtHandler)
 	defer ts.Close()
 
@@ -65,6 +70,72 @@ func pedanticReadAll(r io.Reader) (b []byte, err error) {
 			return b, nil
 		}
 	}
+}
+
+func interestingGoroutines() (gs []string) {
+	buf := make([]byte, 2<<20)
+	buf = buf[:runtime.Stack(buf, true)]
+	for _, g := range strings.Split(string(buf), "\n\n") {
+		sl := strings.SplitN(g, "\n", 2)
+		if len(sl) != 2 {
+			continue
+		}
+		stack := strings.TrimSpace(sl[1])
+		if stack == "" ||
+			strings.Contains(stack, "testing.(*M).before.func1") ||
+			strings.Contains(stack, "os/signal.signal_recv") ||
+			strings.Contains(stack, "created by net.startServer") ||
+			strings.Contains(stack, "created by testing.RunTests") ||
+			strings.Contains(stack, "closeWriteAndWait") ||
+			strings.Contains(stack, "testing.Main(") ||
+			strings.Contains(stack, "runtime.goexit") ||
+			strings.Contains(stack, "created by runtime.gc") ||
+			strings.Contains(stack, "net/http_test.interestingGoroutines") ||
+			strings.Contains(stack, "runtime.MHeap_Scavenger") {
+			continue
+		}
+		gs = append(gs, stack)
+	}
+	sort.Strings(gs)
+	return
+}
+
+func setParallel(t *testing.T) {
+	if testing.Short() {
+		t.Parallel()
+	}
+}
+
+func afterTest(t testing.TB) {
+	http.DefaultTransport.(*http.Transport).CloseIdleConnections()
+	if testing.Short() {
+		return
+	}
+	var bad string
+
+	badSubstring := map[string]string{
+		").readLoop(":  "a Transport",
+		").writeLoop(": "a Transport",
+		"created by net/http/httptest.(*Server).Start": "an httptest.Server",
+		"timeoutHandler":        "a TimeoutHandler",
+		"net.(*netFD).connect(": "a timing out dial",
+		").noteClientGone(":     "a closenotifier sender",
+	}
+	var stacks string
+	for i := 0; i < 4; i++ {
+		bad = ""
+		stacks = strings.Join(interestingGoroutines(), "\n\n")
+		for substr, what := range badSubstring {
+			if strings.Contains(stacks, substr) {
+				bad = what
+			}
+		}
+		if bad == "" {
+			return
+		}
+		time.Sleep(250 * time.Millisecond)
+	}
+	t.Errorf("test appears to have leaked %s:\n%s", bad, stacks)
 }
 
 //type clientServerTest struct {

@@ -42,6 +42,7 @@ var defaultClient = &Client{
 func (c *Client) Do(req *Request) (resp *http.Response, err error) {
 
 	for i := 0; ; i++ {
+
 		var code int
 
 		if req.body != nil {
@@ -60,16 +61,13 @@ func (c *Client) Do(req *Request) (resp *http.Response, err error) {
 		if resp != nil {
 			code = resp.StatusCode
 		}
-
-		checkOK, checkErr := c.retry.isRetry(req.Context(), resp, err)
-
 		if err != nil {
-			if c.logger != nil {
-				c.logger.Printf("ERROR: %s %s request failed: %v", req.Method, req.URL, err)
-			}
+			c.logger.Printf("ERROR: %s %s request failed: %v", req.Method, req.URL, err)
 		}
 
-		if !checkOK {
+		retryable, checkErr := c.retry.isRetry(req.Context(), resp, err)
+
+		if !retryable {
 			if checkErr != nil {
 				err = checkErr
 			}
@@ -90,9 +88,9 @@ func (c *Client) Do(req *Request) (resp *http.Response, err error) {
 		if code > 0 {
 			desc = fmt.Sprintf("%s (status: %d)", desc, code)
 		}
-		if c.logger != nil {
-			c.logger.Printf("RETRY %s retrying in %s (%d left)", desc, wait, remain)
-		}
+
+		c.logger.Printf("RETRY %s retrying in %s (%d left)", desc, wait, remain)
+
 		select {
 		case <-req.Context().Done():
 			return nil, req.Context().Err()
@@ -101,8 +99,7 @@ func (c *Client) Do(req *Request) (resp *http.Response, err error) {
 	}
 
 	if resp != nil {
-		err := resp.Body.Close()
-		if err != nil {
+		if err := resp.Body.Close(); err != nil {
 			c.logger.Printf(err.Error())
 		}
 	}
@@ -112,9 +109,7 @@ func (c *Client) Do(req *Request) (resp *http.Response, err error) {
 func (c *Client) drainBody(body io.ReadCloser) {
 	_, err := io.Copy(ioutil.Discard, io.LimitReader(body, 4096))
 	if err != nil {
-		if c.logger != nil {
-			c.logger.Printf("ERROR: reading response body: %v", err)
-		}
+		c.logger.Printf("ERROR: reading response body: %v", err)
 	}
 
 	err = body.Close()
