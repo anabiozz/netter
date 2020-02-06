@@ -32,8 +32,8 @@ var defaultClient = &Client{
 	},
 	logger: log.New(os.Stderr, "", log.LstdFlags),
 	retry: retry{
-		WaitMin: 1 * time.Second,
-		WaitMax: 10 * time.Second,
+		WaitMin: 2 * time.Second,
+		WaitMax: 8 * time.Second,
 		Max:     4,
 	},
 }
@@ -62,7 +62,7 @@ func (c *Client) Do(req *Request) (resp *http.Response, err error) {
 			code = resp.StatusCode
 		}
 		if err != nil {
-			c.logger.Printf("ERROR: %s %s request failed: %v", req.Method, req.URL, err)
+			c.logger.Printf("netter: %s request failed: %v", req.URL, err)
 		}
 
 		retryable, checkErr := c.retry.isRetry(req.Context(), resp, err)
@@ -84,12 +84,9 @@ func (c *Client) Do(req *Request) (resp *http.Response, err error) {
 		}
 
 		wait := c.retry.backoff(c.retry.WaitMin, c.retry.WaitMax, i)
-		desc := fmt.Sprintf("%s %s", req.Method, req.URL)
-		if code > 0 {
-			desc = fmt.Sprintf("%s (status: %d)", desc, code)
-		}
 
-		c.logger.Printf("RETRY %s retrying in %s (%d left)", desc, wait, remain)
+		desc := fmt.Sprintf("%s (status: %d)", req.URL, code)
+		c.logger.Printf("netter: %s retrying in %s (%d left)", desc, wait, remain)
 
 		select {
 		case <-req.Context().Done():
@@ -103,13 +100,13 @@ func (c *Client) Do(req *Request) (resp *http.Response, err error) {
 			c.logger.Printf(err.Error())
 		}
 	}
-	return nil, fmt.Errorf("ERROR: %s %s giving up after %d attempts", req.Method, req.URL, c.Max+1)
+	return nil, fmt.Errorf("netter: %s giving up after %d attempts", req.URL, c.Max+1)
 }
 
 func (c *Client) drainBody(body io.ReadCloser) {
 	_, err := io.Copy(ioutil.Discard, io.LimitReader(body, 4096))
 	if err != nil {
-		c.logger.Printf("ERROR: reading response body: %v", err)
+		c.logger.Printf("netter: reading response body: %v", err)
 	}
 
 	err = body.Close()

@@ -7,7 +7,9 @@ import (
 	"net/http/httptest"
 	"runtime"
 	"sort"
+	"strconv"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 )
@@ -29,15 +31,14 @@ func TestClient(t *testing.T) {
 
 	client := NewClient()
 	client.Max = 4
-	client.WaitMin = 1 * time.Second
-	client.WaitMax = 10 * time.Second
+	client.WaitMin = 2 * time.Second
+	client.WaitMax = 8 * time.Second
 
 	res, err := client.Get(ts.URL)
 	var bytes []byte
 
 	if err == nil {
 		bytes, err = pedanticReadAll(res.Body)
-		t.Log(string(bytes))
 		err := res.Body.Close()
 		if err != nil {
 			t.Error(err)
@@ -138,172 +139,142 @@ func afterTest(t testing.TB) {
 	t.Errorf("test appears to have leaked %s:\n%s", bad, stacks)
 }
 
-//type clientServerTest struct {
-//	t  *testing.T
-//	h2 bool
-//	h  http.Handler
-//	ts *httptest.Server
-//	tr *http.Transport
-//	c  *Client
-//}
-//
-//func newClientServerTest() {
-//
-//}
-//
-//type reader struct {
-//	val string
-//	pos int
-//}
-//
-//func (c *reader) Read(p []byte) (n int, err error) {
-//	if c.val == "" {
-//		c.val = "hello"
-//	}
-//	if c.pos >= len(c.val) {
-//		return 0, io.EOF
-//	}
-//	var i int
-//	for i = 0; i < len(p) && i+c.pos < len(c.val); i++ {
-//		p[i] = c.val[i+c.pos]
-//	}
-//	c.pos += i
-//	return i, nil
-//}
-//
-//func TestClientDo(t *testing.T) {
-//
-//	testBytes := []byte("hello")
-//
-//	var testCases = []struct {
-//		body interface{}
-//	}{
-//		{
-//			ReaderFunc(func() (io.Reader, error) {
-//				return bytes.NewReader(testBytes), nil
-//			}),
-//		},
-//		{
-//			func() (io.Reader, error) {
-//				return bytes.NewReader(testBytes), nil
-//			},
-//		},
-//		{
-//			testBytes
-//		},
-//		{
-//			bytes.NewBuffer(testBytes)
-//		},
-//		{
-//			bytes.NewReader(testBytes)
-//		},
-//		{
-//			strings.NewReader(string(testBytes))
-//		},
-//		{
-//			strings.NewReader(string(testBytes))
-//		},
-//		{
-//			&reader{}
-//		}
-//	}
-//
-//	for _, test := range testCases {
-//		t.Run(test.desc, func(t *testing.T) {
-//			t.Parallel()
-//
-//		})
-//	}
-//
-//}
-//
-//func testClientDo(t *testing.T, body interface{}) {
-//	request, err := NewRequest("PUT", "http://127.0.0.1:28934/v1/foo", body)
-//	if err != nil {
-//		t.Fatalf("err: %v", err)
-//	}
-//	request.Header.Set("foo", "bar")
-//
-//	retryCount := -1
-//
-//	client := NewClient()
-//	client.Retry.WaitMin = 1 * time.Second
-//	client.Retry.WaitMax = 10 * time.Second
-//	client.Retry.Max = 10
-//
-//	var response *http.Response
-//	donech := make(chan struct{})
-//
-//	go func() {
-//		defer close(donech)
-//		var err error
-//		response, err = client.Do(request)
-//		if err != nil {
-//			t.Fatalf("err: %v", err)
-//		}
-//	}()
-//
-//	select {
-//	case <-donech:
-//		t.Fatalf("should retry on error")
-//	case <-time.After(200 * time.Millisecond):
-//	}
-//
-//	code := int64(500)
-//	handler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-//
-//		if r.Method != "PUT" {
-//			t.Fatalf("bad method: %s", r.Method)
-//		}
-//
-//		if r.RequestURI != "/v1/foo" {
-//			t.Fatalf("bad uri: %s", r.RequestURI)
-//		}
-//
-//		if v := r.Header.Get("foo"); v != "bar" {
-//			t.Fatalf("bad header: expect foo=bar, got foo=%v", v)
-//		}
-//
-//		body, err := ioutil.ReadAll(r.Body)
-//		if err != nil {
-//			t.Fatalf("err: %s", err)
-//		}
-//
-//		expected := []byte("hello")
-//		if !bytes.Equal(body, expected) {
-//			t.Fatalf("bad: %v", body)
-//		}
-//
-//		w.WriteHeader(int(atomic.LoadInt64(&code)))
-//	})
-//
-//	listen, err := net.Listen("tcp", ":28934")
-//	if err != nil {
-//		t.Fatalf("err: %v", err)
-//	}
-//	defer listen.Close()
-//
-//	go http.Serve(listen, handler)
-//
-//	select {
-//	case <-donech:
-//		t.Fatalf("should retry on 500-range")
-//	case <-time.After(200 * time.Millisecond):
-//	}
-//
-//	atomic.StoreInt64(&code, 200)
-//
-//	select {
-//	case <-donech:
-//	case <-time.After(time.Second):
-//		t.Fatalf("timed out")
-//	}
-//
-//	if response.StatusCode != 200 {
-//		t.Fatalf("exected 200, got: %d", response.StatusCode)
-//	}
-//
-//	if retryCount < 0 {
-//		t.Fatal("request log hook was not called")
-//	}
-//}
+type clientServerTest struct {
+	t  *testing.T
+	h2 bool
+	h  http.Handler
+	ts *httptest.Server
+	tr *http.Transport
+	c  *Client
+}
+
+func (t *clientServerTest) close() {
+	t.tr.CloseIdleConnections()
+	t.ts.Close()
+}
+
+func newClientServerTest(t *testing.T, h http.Handler, opts ...interface{}) *clientServerTest {
+	cst := &clientServerTest{
+		t:  t,
+		h:  h,
+		tr: defaultTransport,
+	}
+	cst.c = &Client{httpclient: &http.Client{Transport: cst.tr}}
+	cst.ts = httptest.NewUnstartedServer(h)
+
+	for _, opt := range opts {
+		switch opt := opt.(type) {
+		case func(*http.Transport):
+			opt(cst.tr)
+		case func(*httptest.Server):
+			opt(cst.ts)
+		default:
+			t.Fatalf("unhandled option type %T", opt)
+		}
+	}
+
+	cst.ts.Start()
+
+	return cst
+}
+
+func TestClientHead(t *testing.T) {
+	cst := newClientServerTest(t, robotsTxtHandler)
+	defer cst.close()
+
+	r, err := cst.c.httpclient.Head(cst.ts.URL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := r.Header["Last-Modified"]; !ok {
+		t.Error("Last-Modified header not found.")
+	}
+}
+
+type countHandler struct {
+	mu sync.Mutex
+	n  int
+}
+
+const (
+	maxAttemptRetry = 5
+)
+
+func (h *countHandler) ServeHTTP(w http.ResponseWriter, req *http.Request) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	h.n++
+	if h.n == maxAttemptRetry {
+		w.WriteHeader(http.StatusOK)
+		_, err := w.Write([]byte(strconv.Itoa(h.n)))
+		if err != nil {
+			fmt.Print(err)
+		}
+	} else {
+		w.WriteHeader(http.StatusInternalServerError)
+	}
+}
+
+func TestClientRetry(t *testing.T) {
+	setParallel(t)
+	defer afterTest(t)
+
+	ts := httptest.NewServer(new(countHandler))
+	defer ts.Close()
+
+	client := NewClient()
+	client.Max = maxAttemptRetry
+	client.WaitMin = 2 * time.Second
+	client.WaitMax = 8 * time.Second
+
+	res, err := client.Get(ts.URL)
+	if err != nil {
+		t.Error(err)
+	}
+
+	var bytes []byte
+	var counter int
+
+	bytes, err = pedanticReadAll(res.Body)
+	err = res.Body.Close()
+	if err != nil {
+		t.Error(err)
+	}
+
+	if string(bytes) != "" {
+		counter, err = strconv.Atoi(string(bytes))
+		if err != nil {
+			t.Error(err)
+		}
+	}
+
+	if counter != maxAttemptRetry {
+		t.Errorf("counter should be %d", maxAttemptRetry)
+	}
+}
+
+func TestClientRetryFail(t *testing.T) {
+	setParallel(t)
+	defer afterTest(t)
+
+	ts := httptest.NewServer(new(countHandler))
+	defer ts.Close()
+
+	client := NewClient()
+	client.Max = maxAttemptRetry - 2
+	client.WaitMin = 2 * time.Second
+	client.WaitMax = 8 * time.Second
+
+	res, err := client.Get(ts.URL)
+	if err != nil {
+		if !strings.Contains(err.Error(), "giving up after 4 attempts") {
+			t.Error("error should be 'giving up after 4 attempts'")
+		}
+	} else {
+		t.Error("should be error")
+		err = res.Body.Close()
+		if err != nil {
+			t.Error(err)
+		}
+	}
+}
