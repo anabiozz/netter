@@ -28,6 +28,7 @@ func NewClient() *Client {
 
 var defaultClient = &Client{
 	httpclient: &http.Client{
+		Timeout:   30 * time.Second,
 		Transport: defaultTransport,
 	},
 	logger: log.New(os.Stderr, "", log.LstdFlags),

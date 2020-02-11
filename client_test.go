@@ -3,6 +3,8 @@ package netter
 import (
 	"fmt"
 	"io"
+	"io/ioutil"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"runtime"
@@ -153,11 +155,11 @@ func (t *clientServerTest) close() {
 	t.ts.Close()
 }
 
-func newClientServerTest(t *testing.T, h http.Handler, opts ...interface{}) *clientServerTest {
+func newClientServerTest(t *testing.T, tr  *http.Transport, h http.Handler, opts ...interface{}) *clientServerTest {
 	cst := &clientServerTest{
 		t:  t,
 		h:  h,
-		tr: defaultTransport,
+		tr: tr,
 	}
 	cst.c = &Client{httpclient: &http.Client{Transport: cst.tr}}
 	cst.ts = httptest.NewUnstartedServer(h)
@@ -179,7 +181,7 @@ func newClientServerTest(t *testing.T, h http.Handler, opts ...interface{}) *cli
 }
 
 func TestClientHead(t *testing.T) {
-	cst := newClientServerTest(t, robotsTxtHandler)
+	cst := newClientServerTest(t, defaultTransport, robotsTxtHandler)
 	defer cst.close()
 
 	r, err := cst.c.httpclient.Head(cst.ts.URL)
@@ -276,5 +278,109 @@ func TestClientRetryFail(t *testing.T) {
 		if err != nil {
 			t.Error(err)
 		}
+	}
+}
+
+var timeoutDefaultTransport = &http.Transport{
+	Proxy: http.ProxyFromEnvironment,
+	DialContext: (&net.Dialer{
+		// Limits the time spent establishing a TCP connection
+		// Errors:
+		// i/o timeout
+		Timeout: 30 * time.Millisecond,
+		// TCP KeepAlive specifies the interval between keep-alive probes for an active network connection.
+		KeepAlive: 30 * time.Millisecond,
+	}).DialContext,
+	// Limits the time spent reading the headers of the response
+	// Errors:
+	// net/http: timeout awaiting response headers
+	ResponseHeaderTimeout: 600 * time.Millisecond,
+	MaxIdleConns:          100,
+	// How long an idle connection is kept in the connection pool
+	IdleConnTimeout:       90 * time.Millisecond,
+	ExpectContinueTimeout: 5 * time.Millisecond,
+	DisableKeepAlives:     true,
+	MaxIdleConnsPerHost:   -1,
+}
+
+func TestClientTimeout(t *testing.T) {
+	setParallel(t)
+	defer afterTest(t)
+	testDone := make(chan struct{})
+
+	sawRoot := make(chan bool, 1)
+	sawSlow := make(chan bool, 1)
+
+	cst := newClientServerTest(t, timeoutDefaultTransport, http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
+		if req.URL.Path == "/" {
+			sawRoot <-true
+			time.Sleep(200 * time.Millisecond)
+			http.Redirect(w, req, "/slow", http.StatusFound)
+			return
+		}
+		if req.URL.Path == "/slow" {
+			sawSlow <- true
+			if _, err := w.Write([]byte("Hello")); err != nil {
+				t.Error(err)
+				return
+			}
+			w.(http.Flusher).Flush()
+			<-testDone
+			return
+		}
+	}))
+	defer cst.close()
+	defer close(testDone)
+
+	const timeout = 200 * time.Millisecond
+	cst.c.httpclient.Timeout = timeout
+
+	res, err := cst.c.httpclient.Get(cst.ts.URL)
+	if err != nil {
+		t.Log(err)
+		if strings.Contains(err.Error(), "Client.Timeout") {
+			t.Skipf("host too slow to get fast resource in %v", timeout)
+		}
+		t.Fatal(err)
+	}
+
+	select {
+	case <- sawRoot:
+	default:
+		t.Fatal("handler never got / request")
+	}
+
+	select {
+	case <- sawSlow:
+	default:
+		t.Fatal("handler never got /slow request")
+	}
+
+	errc := make(chan error, 1)
+	go func() {
+		_, err := ioutil.ReadAll(res.Body)
+		errc <- err
+		if err := res.Body.Close(); err != nil {
+			t.Error(err)
+		}
+	}()
+
+	const failTime = 5 * time.Second
+	select {
+	case err := <- errc:
+		if err == nil {
+			t.Fatal("expected error from ReadAll")
+		}
+		ne, ok := err.(net.Error)
+		if !ok {
+			t.Errorf("error value from ReadAll was %T; expected some net.Error", err)
+		} else if !ne.Timeout() {
+			t.Errorf("net.Error.Timeout = false; want true")
+		}
+		if got := ne.Error(); !strings.Contains(got, "Client.Timeout exceeded") {
+			t.Errorf("error string = %q; missing timeout substring", got)
+		}
+	case <- time.After(failTime):
+		t.Errorf("timeout after %v waiting for timeout of %v", failTime, timeout)
 	}
 }
